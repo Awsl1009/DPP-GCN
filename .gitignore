@@ -12,7 +12,11 @@ __pycache__/
 *.egg
 
 # Untracked data/work directories
-data/
+# 忽略 data 目录下的所有内容
+data/*
+
+# 但是，不要忽略 (un-ignore) data 目录下的 .py 文件
+!data/*.py
 work_dir/
 
 # Other common ignores
