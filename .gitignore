@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE settings
+.idea/
+
+# Python packaging
+*.egg-info/
+*.egg
+
+# Untracked data/work directories
+data/
+work_dir/
+
+# Other common ignores
+.DS_Store
