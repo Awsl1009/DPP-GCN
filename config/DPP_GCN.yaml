@@ -1,4 +1,4 @@
-work_dir: ./work_dir/d_gait/DPP_GCN
+work_dir: ./work_dir/d_gait/DPP_GCN_old
 
 # feeder
 feeder: feeders.feeder_CTRGCN.Feeder
