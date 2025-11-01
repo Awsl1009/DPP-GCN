@@ -221,7 +221,7 @@ def get_parser():
     # === 修改：替换旧的 loss_alpha ===
     # parser.add_argument('--loss-alpha', type=float, default=1.0) #
     parser.add_argument('--lambda-proto', type=float, default=1.0, help='Weight for L_proto (contrastive loss)')
-    parser.add_argument('--lambda-adv', type=float, default=0.5, help='Weight for L_adv (adversarial loss)')
+    parser.add_argument('--lambda-adv', type=float, default=2.0, help='Weight for L_adv (adversarial loss)')
 
     return parser
 

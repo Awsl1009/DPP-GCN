@@ -319,7 +319,7 @@ class DPP_GCN(nn.Module):
     集成了对抗性解耦 (DIFFER) 和分部位原型对齐 (PP-GCN) 的新模型。
     """
     def __init__(self, num_class=2, num_point=17, num_person=1, graph=None, graph_args=dict(), in_channels=2,
-                 drop_out=0, adaptive=True, 
+                 drop_out=0, adaptive=True, head=['ViT-L/14'],
                  # 新增参数:
                  num_confounders=4,      # 要对抗的混淆因素数量 (例如: 角度, 服装, 高度, 方向)
                  confounder_dims=None,   # 一个列表，包含每个混淆因素的类别数, e.g., [8, 3, 2, 2]
