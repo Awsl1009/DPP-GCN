@@ -221,7 +221,16 @@ def get_parser():
     # === 修改：替换旧的 loss_alpha ===
     # parser.add_argument('--loss-alpha', type=float, default=1.0) #
     parser.add_argument('--lambda-proto', type=float, default=1.0, help='Weight for L_proto (contrastive loss)')
-    parser.add_argument('--lambda-adv', type=float, default=0.5, help='Weight for L_adv (adversarial loss)')
+    parser.add_argument('--lambda-adv', type=float, default=1.0, help='Weight for L_adv (adversarial loss)')
+
+    # === 新增：选择要使用的混淆变量 ===
+    parser.add_argument(
+        '--confounders-to-use', 
+        type=str, 
+        nargs='+', 
+        default=['angle', 'cloth', 'height', 'direction'], 
+        help='List of confounders to use for adversarial training. Options: angle, cloth, height, direction.')
+    # ================================
 
     return parser
 
@@ -234,6 +243,28 @@ class Processor():
     def __init__(self, arg):
         self.arg = arg
         self.save_arg()
+
+        # === 新增：定义和过滤要使用的混淆变量 ===
+        # 1. 定义所有可能的混淆变量及其维度
+        #    注意：顺序必须与 train() 中加载标签的顺序严格一致！
+        self.ALL_CONFOUNDER_SPECS = OrderedDict([
+            ('angle', 8),
+            ('cloth', 3),
+            ('height', 2),
+            ('direction', 2)
+        ])
+        
+        # 2. 根据 arg.confounders_to_use 过滤，生成激活列表
+        self.active_confounders = OrderedDict()
+        for key in self.arg.confounders_to_use:
+            if key in self.ALL_CONFOUNDER_SPECS:
+                self.active_confounders[key] = self.ALL_CONFOUNDER_SPECS[key]
+            else:
+                print(f"警告: 指定了未知的混淆变量 '{key}'，将被忽略。")
+        
+        # 打印日志，确认哪些混淆变量被激活
+        self.print_log(f"将使用 {len(self.active_confounders)} 个混淆变量: {list(self.active_confounders.keys())}")
+        # =========================================
 
         if arg.phase == 'train':
             if not arg.train_feeder_args['debug']:
@@ -266,6 +297,7 @@ class Processor():
         self.lr = self.arg.base_lr
         self.best_F1 = 0
         self.best_F1_epoch = 0
+        self.current_best_model_path = None  # <== 新增：跟踪最佳模型路径
         self.model = self.model.cuda(self.output_device)
 
         if type(self.arg.device) is list:
@@ -295,13 +327,13 @@ class Processor():
             # 2 = 正常/抑郁
             self.E_proto_gait = self.E_proto_gait.view(num_text_aug, 2, -1)
 
-        # 3. 编码 Branch B 混淆原型
-        self.E_conf_all = {}
-        confounder_keys = ['cloth', 'angle', 'height', 'direction']
-        with torch.no_grad():
-            for key in confounder_keys:
-                tokens = confounder_tokens[key].to(device)
-                self.E_conf_all[key] = clip_model.encode_text(tokens).float()
+        # # 3. 编码 Branch B 混淆原型
+        # self.E_conf_all = {}
+        # confounder_keys = ['cloth', 'angle', 'height', 'direction']
+        # with torch.no_grad():
+        #     for key in confounder_keys:
+        #         tokens = confounder_tokens[key].to(device)
+        #         self.E_conf_all[key] = clip_model.encode_text(tokens).float()
         
         del clip_model # 释放 CLIP 模型内存
         self.print_log("Text prototypes loaded and encoded.")
@@ -333,6 +365,13 @@ class Processor():
         Model = import_class(self.arg.model)
         shutil.copy2(inspect.getfile(Model), self.arg.work_dir)
         print(Model)
+
+        # === 新增：动态设置模型参数以匹配激活的混淆变量 ===
+        # 获取激活的混淆变量的维度列表, e.g., [8, 3]
+        active_dims = list(self.active_confounders.values())
+        self.arg.model_args['confounder_dims'] = active_dims
+        # =================================================
+
         self.model = Model(**self.arg.model_args)
         print(self.model)
         
@@ -472,7 +511,7 @@ class Processor():
         self.record_time()
         return split_time
 
-    def train(self, epoch, save_model=False):
+    def train(self, epoch):
         self.model.train()
         self.print_log('Training epoch: {}'.format(epoch + 1))
         loader = self.data_loader['train']
@@ -490,9 +529,9 @@ class Processor():
         timer = dict(dataloader=0.001, model=0.001, statistics=0.001)
         process = tqdm(loader, ncols=40)
 
-        # === 准备 Branch B 混淆原型 (从 self 中获取) ===
-        conf_keys = ['cloth', 'angle', 'height', 'direction']
-        E_conf = [self.E_conf_all[k] for k in conf_keys]
+        # # === 准备 Branch B 混淆原型 (从 self 中获取) ===
+        # conf_keys = ['cloth', 'angle', 'height', 'direction']
+        # E_conf = [self.E_conf_all[k] for k in conf_keys]
 
         for batch_idx, (data, labels_dict, index) in enumerate(process):
             self.global_step += 1
@@ -503,20 +542,38 @@ class Processor():
                 # 主标签 (抑郁/正常)
                 label_dep = labels_dict['label_dep'].long().cuda(self.output_device)
                 # 混淆标签
-                label_cloth = labels_dict['label_cloth'].long().cuda(self.output_device)
                 label_angle = labels_dict['label_angle'].long().cuda(self.output_device)
+                label_cloth = labels_dict['label_cloth'].long().cuda(self.output_device)
                 label_height = labels_dict['label_height'].long().cuda(self.output_device)
                 label_direction = labels_dict['label_direction'].long().cuda(self.output_device)
+
+                # === 修改：动态打包激活的混淆标签 ===
+                # 1. 先定义一个包含所有标签的字典
+                all_labels_conf = {
+                    'angle': label_angle,
+                    'cloth': label_cloth,
+                    'height': label_height,
+                    'direction': label_direction
+                }
+                # 2. 根据 self.active_confounders 过滤，保持顺序
+                labels_conf = [all_labels_conf[key] for key in self.active_confounders.keys()]
+                # ===================================
                 
-                # 打包混淆标签
-                labels_conf = [label_angle, label_cloth, label_height, label_direction]
+                # # 打包混淆标签
+                # labels_conf = [label_angle, label_cloth, label_height, label_direction]
             
             timer['dataloader'] += self.split_time()
 
             # forward
             with torch.cuda.amp.autocast():
+                # === 新增：计算动态 GRL Alpha ===
+                # (基于 GRL 原始论文  的调度器)
+                len_loader = len(loader)
+                p = float(batch_idx + epoch * len_loader) / (self.arg.num_epoch * len_loader)
+                grl_alpha = 2. / (1. + np.exp(-10. * p)) - 1
+
                 # === 修改：DPP_GCN 的新输出 ===
-                logits_ce, feature_dict, logit_scale, part_features, logits_adv = self.model(data)
+                logits_ce, feature_dict, logit_scale, part_features, logits_adv = self.model(data, grl_alpha=grl_alpha)
                 
                 # --- 1. 计算 L_proto (主对比损失，逻辑同) ---
                 label_g = gen_label(label_dep)
@@ -524,27 +581,25 @@ class Processor():
                 
                 loss_te_list = []
 
-                # 全局特征 (来自 feature_dict)
-                f_global_proto = feature_dict[self.arg.model_args['head'][0]] #
-                E_text_global = self.E_proto_gait[0, label_dep, :] # (B, 768)
-                
-                logits_img_global, logits_text_global = create_logits(f_global_proto, E_text_global, logit_scale[:, 0].mean())
-                loss_img_g = self.loss_proto_kl(logits_img_global, ground_truth)
-                loss_text_g = self.loss_proto_kl(logits_text_global, ground_truth)
-                loss_te_list.append((loss_img_g + loss_text_g) / 2)
+                # === 修改：移除了全局特征的损失计算 (f_global_proto) ===
+                # (旧的 F1_main_multipart_CTRGCN.py 脚本只循环了 4 次)
+                # ======================================================
 
                 # 4个部位特征 (来自 part_features)
                 for ind in range(4): # 0, 1, 2, 3
-                    f_part = part_features[ind] # (原 [ind-1])
-                    E_text_part = self.E_proto_gait[ind + 1, label_dep, :] # (原 ind)
+                    f_part = part_features[ind] 
                     
+                    # (索引 ind+1 对应 text_dict[1] 到 text_dict[4])
+                    E_text_part = self.E_proto_gait[ind + 1, label_dep, :] 
+                    
+                    # (索引 ind+1 对应 logit_scale 的第 1 到 4 号索引)
                     logits_img_part, logits_text_part = create_logits(f_part, E_text_part, logit_scale[:, ind + 1].mean())
                     
                     loss_img_p = self.loss_proto_kl(logits_img_part, ground_truth)
                     loss_text_p = self.loss_proto_kl(logits_text_part, ground_truth)
                     loss_te_list.append((loss_img_p + loss_text_p) / 2)
                 
-                # (L_proto 保持不变)
+                # (L_proto 现在只包含 4 个部分的损失)
                 loss_proto = sum(loss_te_list) / len(loss_te_list) #
 
                 # --- 2. 计算 L_ce (主分类损失，逻辑同) ---
@@ -553,13 +608,29 @@ class Processor():
                 
                 # --- 3. 新增：计算 L_adv (对抗性损失) ---
                 loss_adv_list = []
-                # 遍历4个混淆因素
-                for i in range(len(logits_adv)): 
-                    logits_conf = logits_adv[i] # e.g., (B, 8) for angle
-                    labels_conf_gt = labels_conf[i] # e.g., (B) for angle
-                    loss_adv_list.append(self.loss_adv_ce(logits_conf, labels_conf_gt))
+
+                # === 修改：仅在有激活的混淆因素时计算 ===
+                if len(logits_adv) > 0: # 检查模型是否返回了任何对抗性 logits
+                    # 遍历激活的混淆因素
+                    for i in range(len(logits_adv)): 
+                        logits_conf = logits_adv[i] 
+                        labels_conf_gt = labels_conf[i] 
+                        loss_adv_list.append(self.loss_adv_ce(logits_conf, labels_conf_gt))
+                    
+                    loss_adv = sum(loss_adv_list) / len(loss_adv_list)
+                else:
+                    # 如果没有激活的混淆因素 (e.g., --confounders-to-use 为空)
+                    # L_adv 损失为 0
+                    loss_adv = torch.tensor(0.0).cuda(self.output_device)
+                # ===================================
+
+                # # 遍历4个混淆因素
+                # for i in range(len(logits_adv)): 
+                #     logits_conf = logits_adv[i] # e.g., (B, 8) for angle
+                #     labels_conf_gt = labels_conf[i] # e.g., (B) for angle
+                #     loss_adv_list.append(self.loss_adv_ce(logits_conf, labels_conf_gt))
                 
-                loss_adv = sum(loss_adv_list) / len(loss_adv_list)
+                # loss_adv = sum(loss_adv_list) / len(loss_adv_list)
 
             # === 修改：合并所有损失 ===
             loss = loss_ce + self.arg.lambda_proto * loss_proto + self.arg.lambda_adv * loss_adv
@@ -619,12 +690,6 @@ class Processor():
         )
         self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
 
-        if save_model:
-            state_dict = self.model.state_dict()
-            weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
-
-            torch.save(weights,
-                       self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt')
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
         if wrong_file is not None:
@@ -723,12 +788,33 @@ class Processor():
             
             # === 修改：OneCycleLR 不在 epoch 级别调整 ===
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
-                save_model = (((epoch + 1) % self.arg.save_interval == 0) or (
-                        epoch + 1 == self.arg.num_epoch)) and (epoch + 1) > self.arg.save_epoch
 
-                self.train(epoch, save_model=save_model)
+                self.train(epoch)
 
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
+
+                # === 新增：只保存 F1 Score 最高的模型 ===
+                # 检查 eval 后，当前 epoch 是否成为了新的 best epoch
+                if (epoch + 1) == self.best_F1_epoch:
+                    self.print_log(f'>>> New best F1: {self.best_F1:.4f} at epoch {self.best_F1_epoch}. Saving model...')
+                    
+                    # 1. 构造新的 best-model 保存路径
+                    # 路径格式必须与你后面的 glob 逻辑匹配
+                    new_best_path = self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt'
+
+                    # 2. 保存新的最佳模型
+                    state_dict = self.model.state_dict()
+                    weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
+                    torch.save(weights, new_best_path)
+                    self.print_log(f'Model saved to: {new_best_path}')
+
+                    # 3. 删除上一个 best-model (如果存在且路径不同)
+                    if self.current_best_model_path and self.current_best_model_path != new_best_path and os.path.exists(self.current_best_model_path):
+                        os.remove(self.current_best_model_path)
+                        self.print_log(f'Removed old best model: {self.current_best_model_path}')
+                    
+                    # 4. 更新 best-model 路径
+                    self.current_best_model_path = new_best_path
 
             # (test the best model 逻辑保持不变)
             print(self.best_F1_epoch)

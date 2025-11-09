@@ -1,3 +1,8 @@
-DPP_GCN_old：原版本只用了四个部位对比损失（Better）
-DPP_GCN：现有版本使用了四个部位对比损失+总体特征对比损失
-DPP_GCN_old_loss2：设置loss_adv=2.0，增强新加入对抗分支影响
+DPP_GCN_old：原版本只用了四个部位对比损失（Better）     F1:57.29% Precision:48.99% Recall:68.98%
+DPP_GCN：现有版本使用了四个部位对比损失+总体特征对比损失        F1:56.98% Precision:48.23% Recall:69.61%
+DPP_GCN_old_loss2：设置loss_adv=2.0，增强新加入对抗分支影响     F1:57.03% Precision:48.06% Recall:70.12%
+DPP_GCN_old_loss1.5：设置loss_adv=1.5，增强新加入对抗分支影响       F1:57.22% Precision:47.82% Recall:71.23%
+DPP_GCN_old_loss1.0：设置loss_adv=1.0，增强新加入对抗分支影响       F1:56.81% Precision:46.50% Recall:73.00%
+DPP_GCN_old_loss_dynamic：设置loss_adv为动态        F1:57.62% Precision:47.36% Recall:73.55%
+DPP_GCN_old_loss_dynamic_warmepoch5：设置loss_adv为动态，warmepoch由30->5       F1:56.69% Precision:44.94% Recall:76.78%
+DPP_GCN_new：改为参照原论文对比损失         F1:56.89% Precision:44.76% Recall:78.04%

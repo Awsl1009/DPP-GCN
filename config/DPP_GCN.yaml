@@ -1,4 +1,4 @@
-work_dir: ./work_dir/d_gait/DPP_GCN_old_loss2
+work_dir: ./work_dir/d_gait/DPP_GCN_old_loss_dynamic_angle
 
 # feeder
 feeder: feeders.feeder_CTRGCN.Feeder
@@ -28,7 +28,7 @@ test_feeder_args:
   debug: False
 
 # model
-model: model.ctrgcn.DPP_GCN
+model: model.ctrgcn_loss.DPP_GCN
 model_args:
   num_class: 2
   num_point: 17

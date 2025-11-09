@@ -221,7 +221,7 @@ def get_parser():
     # === 修改：替换旧的 loss_alpha ===
     # parser.add_argument('--loss-alpha', type=float, default=1.0) #
     parser.add_argument('--lambda-proto', type=float, default=1.0, help='Weight for L_proto (contrastive loss)')
-    parser.add_argument('--lambda-adv', type=float, default=2.0, help='Weight for L_adv (adversarial loss)')
+    parser.add_argument('--lambda-adv', type=float, default=1.0, help='Weight for L_adv (adversarial loss)')
 
     return parser
 
@@ -266,6 +266,7 @@ class Processor():
         self.lr = self.arg.base_lr
         self.best_F1 = 0
         self.best_F1_epoch = 0
+        self.current_best_model_path = None  # <== 新增：跟踪最佳模型路径
         self.model = self.model.cuda(self.output_device)
 
         if type(self.arg.device) is list:
@@ -425,6 +426,12 @@ class Processor():
             f.write(f"# command line: {' '.join(sys.argv)}\n\n")
             yaml.dump(arg_dict, f)
 
+        # === 新增：保存当前训练脚本的快照 ===
+        # sys.argv[0] 是当前执行的脚本文件，例如 'train.py'
+        script_name = os.path.basename(sys.argv[0])
+        dest_script_path = os.path.join(self.arg.work_dir, script_name)
+        shutil.copy2(sys.argv[0], dest_script_path)
+
 
     def adjust_learning_rate(self, epoch):
         if self.arg.optimizer == 'SGD' or self.arg.optimizer == 'Adam':
@@ -466,7 +473,7 @@ class Processor():
         self.record_time()
         return split_time
 
-    def train(self, epoch, save_model=False):
+    def train(self, epoch):
         self.model.train()
         self.print_log('Training epoch: {}'.format(epoch + 1))
         loader = self.data_loader['train']
@@ -611,12 +618,6 @@ class Processor():
         )
         self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
 
-        if save_model:
-            state_dict = self.model.state_dict()
-            weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
-
-            torch.save(weights,
-                       self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt')
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
         if wrong_file is not None:
@@ -715,12 +716,33 @@ class Processor():
             
             # === 修改：OneCycleLR 不在 epoch 级别调整 ===
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
-                save_model = (((epoch + 1) % self.arg.save_interval == 0) or (
-                        epoch + 1 == self.arg.num_epoch)) and (epoch + 1) > self.arg.save_epoch
 
-                self.train(epoch, save_model=save_model)
+                self.train(epoch)
 
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
+
+                # === 新增：只保存 F1 Score 最高的模型 ===
+                # 检查 eval 后，当前 epoch 是否成为了新的 best epoch
+                if (epoch + 1) == self.best_F1_epoch:
+                    self.print_log(f'>>> New best F1: {self.best_F1:.4f} at epoch {self.best_F1_epoch}. Saving model...')
+                    
+                    # 1. 构造新的 best-model 保存路径
+                    # 路径格式必须与你后面的 glob 逻辑匹配
+                    new_best_path = self.arg.model_saved_name + '-' + str(epoch + 1) + '-' + str(int(self.global_step)) + '.pt'
+
+                    # 2. 保存新的最佳模型
+                    state_dict = self.model.state_dict()
+                    weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
+                    torch.save(weights, new_best_path)
+                    self.print_log(f'Model saved to: {new_best_path}')
+
+                    # 3. 删除上一个 best-model (如果存在且路径不同)
+                    if self.current_best_model_path and self.current_best_model_path != new_best_path and os.path.exists(self.current_best_model_path):
+                        os.remove(self.current_best_model_path)
+                        self.print_log(f'Removed old best model: {self.current_best_model_path}')
+                    
+                    # 4. 更新 best-model 路径
+                    self.current_best_model_path = new_best_path
 
             # (test the best model 逻辑保持不变)
             print(self.best_F1_epoch)
